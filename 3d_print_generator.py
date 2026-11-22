@@ -42,7 +42,6 @@ CONFIG = dict(
         flat=1.0,                    # flat at the V apex so the toolpath U-turns instead of spiking
         margin=5.0,                  # deg added to the throw when sizing the V
         end_gap=1.0,                 # spanwise clearance at the surface end next to fixed structure
-        elevator_joiner=dict(diameter=1.0, insert=30.0),   # rod through both elevator halves, under the rudder
     ),
     # ---- aileron servo tray pockets (bottom skin of each aileron panel; trays not generated) ----
     servo_pocket=dict(
@@ -50,24 +49,27 @@ CONFIG = dict(
         chord_len=24.0,              # tray body footprint along the chord   <- set to your tray
         span_len=14.0,               # tray body footprint along the span    <- set to your tray
         depth=7.0,                   # tray body depth above the bottom skin <- set to your tray
-        chord_fraction=None,         # None = centred in the free space between spar/pins and hinge groove
+        chord_fraction=None,         # None = centred in the free space between spar and hinge groove
     ),
 
-    # ---- carbon rods (diameters are the rods, bores get ROD_CLEARANCE added) ----------
+    # ---- carbon rods: one wing spar + the tail boom (bores get rod_clearance added) ------------
     wing_spar=dict(
-        diameter=5.0,
-        mode="continuous",           # "continuous": one straight rod through both wings
-                                     # "per_side": one rod per side following the dihedral
+        diameter=5.0,                # one straight rod through both wings, centred on the centreline
         chord_fraction=None,         # None = root max-thickness position
         max_semi_length=None,        # cap on the rod's half length (None = as far as it fits)
     ),
-    wing_pins=dict(diameter=2.0, length=30.0, rear_fraction=0.60),  # panel-joint alignment pins
-    ht_rod=dict(diameter=2.0, chord_fraction=0.22),
-    vt_rod=dict(diameter=2.0, chord_fraction=0.45),
     boom=dict(diameter=8.0, socket_fuselage=40.0, socket_mount=30.0),
 
     # ---- tail mount ---------------------------------------------------------------------
     mount=dict(width=14.0, nose_ahead=15.0, wall=1.6),
+    tail_servos=dict(
+        length=23.0,                 # case length along x (tab to tab direction)
+        width=12.2,                  # case thickness across y
+        tab_span=32.5,               # length over the mounting tabs
+        tab_height=16.0,             # case bottom to the underside of the tabs (depth in the slot)
+        clearance=0.3,               # added to length and width
+        wall=1.6,                    # block walls (also between slot and boom bore)
+    ),
 
     # ---- fuselage (pod under the wing; nose + wingbox) -------------------------------------
     # stations: (x, width, height, z_top). Under the wing z_top sits 1 mm above the chord
@@ -84,7 +86,7 @@ CONFIG = dict(
         squareness=2.6,              # superellipse exponent (2 = ellipse, higher = boxier)
         wall=1.0,
         split_x=-20.0,               # nose | wingbox joint
-        spigot_length=12.0, spigot_wall=1.0, spigot_clearance=0.15,
+        spigot_length=15.0, spigot_wall=1.0, spigot_clearance=0.15,
         firewall=3.0,
         motor_center_hole=8.0, motor_bolt=3.2, motor_bolt_spacing=(16.0, 19.0),
         dowel_diameter=3.2, dowel_x=(-8.0, 106.0), dowel_below_top=8.0,
@@ -187,7 +189,6 @@ def naca4(code, n=N_AF):
     # resample both surfaces on the common cosine x grid
     return x, np.interp(x, xu, zu), np.interp(x, xl, zl)
 
-
 def read_dat(path, n=N_AF):
     """Selig (TE->upper->LE->lower->TE) or Lednicer (counts line, upper LE->TE, lower LE->TE)."""
     rows = []
@@ -212,7 +213,6 @@ def read_dat(path, n=N_AF):
     zu = (np.interp(x0 + x * c, up[:, 0], up[:, 1]) - z0) / c
     zl = (np.interp(x0 + x * c, lo[:, 0], lo[:, 1]) - z0) / c
     return x, zu, zl
-
 
 def load_airfoil(spec):
     s = spec.strip().lower()
@@ -275,10 +275,6 @@ class Surface:
         if x < U[0, 0] or x > U[-1, 0]:
             return float("nan"), float("nan")
         return float(np.interp(x, L[:, 0], L[:, 1])), float(np.interp(x, U[:, 0], U[:, 1]))
-
-    def camber_at(self, s, x):
-        lo, up = self.surfaces_at(s, x)
-        return 0.5 * (lo + up)
 
     def max_thickness_fraction(self):
         t = self.zu_n - self.zl_n
@@ -425,10 +421,9 @@ class Surface:
 
 # rods
 class Bore:
-    def __init__(self, name, p0, p1, rod_d, clearance, slit_down=None):
+    def __init__(self, name, p0, p1, rod_d, clearance):
         self.name, self.p0, self.p1 = name, np.asarray(p0, float), np.asarray(p1, float)
         self.rod_d, self.d = rod_d, rod_d + clearance
-        self.slit_down = slit_down
 
     @property
     def length(self):
@@ -501,28 +496,6 @@ def solve_continuous_rod(surf, rod_d, clearance, min_wall, fraction, cap, step=1
     semi = reach if cap is None else min(reach, cap)
     return (x_g, z_g, semi), f
 
-def solve_local_rod(surf, rod_d, clearance, min_wall, fraction, s_start=0.0, cap=None, step=1.0):
-    """Rod along a constant-chord-fraction line in the surface's own frame, on the camber line."""
-    r = (rod_d + clearance) / 2
-    f = surf.max_thickness_fraction() if fraction is None else fraction
-
-    def pt(s):
-        x = surf.x_le(s) + f * surf.chord(s)
-        return np.array([x, s, surf.camber_at(max(s, 0.0), x)])
-
-    s = max(s_start, 0.0)
-    if not fits(surf, s, *pt(s)[[0, 2]], r, min_wall):
-        return None, f
-    while s + step <= surf.b - TIP_MARGIN:
-        p = pt(s + step)
-        if not fits(surf, s + step, p[0], p[2], r, min_wall):
-            break
-        s += step
-    if cap is not None:
-        s = min(s, s_start + cap)
-    p0, p1 = pt(s_start), pt(s)
-    return surf.to_global([p0, p1]), f
-
 # control surfaces
 def local_loft(surf, stations, poly_fn):
     """Ruled loft through closed polygons given in the surface's local (x, z) at each span station."""
@@ -564,10 +537,6 @@ class Hinge:
         free = lo if self.sgn > 0 else up
         return self.flat / 2 + abs(self.apex(s)[0] - free) * self.tan
 
-    def face_x(self, s, z):
-        """x of the V rear face (the surface's LE wall) at height z"""
-        return self.x_h(s) + self.flat / 2 + abs(self.apex(s)[0] - z) * self.tan
-
     def poly(self, s):
         lo, up = self.skins(s)
         za = self.apex(s)[0]
@@ -604,7 +573,6 @@ class Hinge:
         R = np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
         return p @ R.T + [xh, zh]
 
-
 class Pocket:
     """Servo-tray pocket in the bottom skin: flat floor at z_floor over [xa, xb] x [sa, sb],
     45 deg ramps at both span ends (span = print z, so a square end would be a ceiling)."""
@@ -626,16 +594,15 @@ class Pocket:
         k, r = self.keep, self.ramp
         return self.xa - k <= x <= self.xb + k and self.sa - r - k <= s <= self.sb + r + k
 
-
 def place_pocket(surf, s0, s1, hinge, bores, SP, P):
     """Put the tray pocket SP['span_offset'] outboard of s0, chordwise in the widest gap between
-    the LE region, bore keep-outs (spar, pins and their slits) and the hinge groove."""
+    the LE region, the spar bore keep-out (incl. its slit) and the hinge groove."""
     keep = P["bore_keepout"]
     s_c = s0 + SP["span_offset"]
     sa, sb = s_c - SP["span_len"] / 2, s_c + SP["span_len"] / 2
     ramp_est = SP["depth"] + 3.0
     if sa - ramp_est < s0 or sb + ramp_est > s1:
-        warn(f"servo pocket (with its 45 deg ramps) runs past the panel ends; change span_offset")
+        warn("servo pocket (with its 45 deg ramps) runs past the panel ends; change span_offset")
     bad = []
     for s in np.linspace(max(sa - ramp_est, s0), min(sb + ramp_est, s1), 7):
         c, xle = surf.chord(s), surf.x_le(s)
@@ -656,7 +623,7 @@ def place_pocket(surf, s0, s1, hinge, bores, SP, P):
             free.append((cur, a))
         cur = max(cur, b)
     if not free:
-        warn("no room for the servo pocket between the spar/pins and the hinge groove; skipped")
+        warn("no room for the servo pocket between the spar and the hinge groove; skipped")
         return None, None
     if SP["chord_fraction"] is None:
         win = max(free, key=lambda ab: ab[1] - ab[0])
@@ -667,7 +634,7 @@ def place_pocket(surf, s0, s1, hinge, bores, SP, P):
     xa, xb = x_c - SP["chord_len"] / 2, x_c + SP["chord_len"] / 2
     if xa < win[0] or xb > win[1]:
         warn(f"servo pocket {SP['chord_len']:.0f} mm chordwise does not fit the free window "
-             f"({win[1] - win[0]:.1f} mm between spar/pins and hinge groove); it cuts into a keep-out")
+             f"({win[1] - win[0]:.1f} mm between spar and hinge groove); it cuts into a keep-out")
     xs = np.linspace(xa, xb, 9)
     lo_c = surf.surfaces_at(s_c, x_c)[0]
     z_floor = lo_c + SP["depth"]
@@ -681,7 +648,6 @@ def place_pocket(surf, s0, s1, hinge, bores, SP, P):
     pk = Pocket("servo_pocket", surf, xa, xb, sa, sb, z_floor, z_below, keep)
     meta = dict(x_c=x_c, s_c=s_c, depth=z_floor - lo_c, ramp_skin=z_floor - lo_c, window=win)
     return pk, meta
-
 
 # vase-mode panel
 def vase_panel(surf, s0, s1, pitch, angle, bores, P, hinge=None, trims=(), pockets=()):
@@ -700,7 +666,6 @@ def vase_panel(surf, s0, s1, pitch, angle, bores, P, hinge=None, trims=(), pocke
     tools += [p.cutter() for p in pockets]
     body = body.cut(*tools)
     return biggest_solid(body.clean())
-
 
 def check_hinge_bores(hinge, bores, keep):
     cut = hinge.cutter()
@@ -812,66 +777,24 @@ def build(cfg):
                    W["twist"], W["airfoil"], W["origin"], W["dihedral"], P["te_thickness"],
                    W.get("incidence", 0.0))
     sp = cfg["wing_spar"]
-    bores = []
-    if sp["mode"] == "continuous":
-        res, f = solve_continuous_rod(wing, sp["diameter"], clr, P["min_wall"], sp["chord_fraction"],
-                                      sp["max_semi_length"])
-        if res is None:
-            raise SystemExit("Wing spar does not fit at the root. Use a smaller diameter.")
-        x_r, z_r, semi = res
-        bores.append(Bore("wing_spar", [x_r, 0, z_r], [x_r, semi, z_r], sp["diameter"], clr))
-        rod_reach_s = semi
-        info.append(f"Wing spar (continuous): {sp['diameter']:.1f} mm rod, length {2 * semi:.0f} mm, "
-                    f"at x={x_r:.1f}, z={z_r:.2f} (root chord fraction {f:.2f}), centred on the centreline")
-        if semi < 0.6 * wing.b and W["dihedral"]:
-            info.append(f"  (dihedral {W['dihedral']} deg limits a straight rod to {semi:.0f} mm per side; "
-                        "use per_side mode or a thinner rod to reach further)")
-    else:
-        res, f = solve_local_rod(wing, sp["diameter"], clr, P["min_wall"], sp["chord_fraction"],
-                                 cap=sp["max_semi_length"])
-        if res is None:
-            raise SystemExit("Wing spar does not fit at the root. Use a smaller diameter.")
-        bores.append(Bore("wing_spar", res[0], res[1], sp["diameter"], clr))
-        rod_reach_s = float(np.linalg.norm(res[1] - res[0]))
-        info.append(f"Wing spar (per side): 2 x {sp['diameter']:.1f} mm rods, {rod_reach_s:.0f} mm each, "
-                    f"chord fraction {f:.2f}. They meet at the centreline (the wingbox saddle carries the joint)")
-
-    # joint pins
-    pins = cfg["wing_pins"]
-    splits = [W["splits"][i] * wing.b for i in range(len(W["splits"]))]
-    for j, sj in enumerate(splits[:-1]):
-        want = [("rear", pins["rear_fraction"])]
-        if rod_reach_s < sj + pins["length"] / 2 + 5:
-            want.append(("front", wing.max_thickness_fraction()))
-        for tag, fr in want:
-            r = (pins["diameter"] + clr) / 2
-            if sj == 0.0:
-                if tag == "front":
-                    continue
-                x = wing.x_le(0) + fr * wing.cr
-                xg, _, zg = wing.to_global([[x, 0, wing.camber_at(0, x)]])[0]
-                ok = fits(wing, 0.0, x, wing.camber_at(0, x), r, P["min_wall"])
-                p0, p1 = [xg, 0, zg], [xg, pins["length"] / 2, zg]
-            else:
-                pts = []
-                ok = True
-                for s in (sj - pins["length"] / 2, sj + pins["length"] / 2):
-                    xx = wing.x_le(s) + fr * wing.chord(s)
-                    zz = wing.camber_at(s, xx)
-                    ok &= fits(wing, s, xx, zz, r, P["min_wall"])
-                    pts.append([xx, s, zz])
-                p0, p1 = wing.to_global(pts)
-            if not ok:
-                warn(f"{tag} alignment pin at span {sj:.0f} mm does not fit ({pins['diameter']} mm), skipped")
-                continue
-            bores.append(Bore(f"pin_{tag}_{j}", p0, p1, pins["diameter"], clr))
-            info.append(f"Alignment pin ({tag}) at wing joint {sj:.0f} mm: {pins['diameter']} x "
-                        f"{pins['length']:.0f} mm rod")
+    res, f = solve_continuous_rod(wing, sp["diameter"], clr, P["min_wall"], sp["chord_fraction"],
+                                  sp["max_semi_length"])
+    if res is None:
+        raise SystemExit("Wing spar does not fit at the root. Use a smaller diameter.")
+    x_r, z_r, semi = res
+    spar = Bore("wing_spar", [x_r, 0, z_r], [x_r, semi, z_r], sp["diameter"], clr)
+    bores = [spar]
+    info.append(f"Wing spar: {sp['diameter']:.1f} mm rod, length {2 * semi:.0f} mm, "
+                f"at x={x_r:.1f}, z={z_r:.2f} (root chord fraction {f:.2f}), centred on the centreline")
+    splits = [fr * wing.b for fr in W["splits"]]
+    for sj in splits[1:-1]:
+        if semi < sj:
+            info.append(f"  (dihedral {W['dihedral']} deg limits the straight spar to {semi:.0f} mm per side; "
+                        f"the wing joint at {sj:.0f} mm has no rod through it)")
 
     C = cfg["controls"]
-    for surf_ in (wing,):
-        if surf_.twist_tip:
-            warn(f"{surf_.name} has twist: the hinge line is not exactly straight on a twisted panel")
+    if wing.twist_tip:
+        warn("wing has twist: the hinge line is not exactly straight on a twisted panel")
     n_pan = len(splits) - 1
     for i, (s0, s1) in enumerate(zip(splits[:-1], splits[1:])):
         t0 = time.time()
@@ -915,7 +838,6 @@ def build(cfg):
                  Vt["airfoil"], Vt["origin"], 90.0, P["te_thickness"])
     half_w = Mt["width"] / 2
     xm = ht.x_le(0) + ht.max_thickness_fraction() * ht.cr
-    ht_root_lo, ht_root_up = ht.surfaces_at(0, xm)
     z_ht = H["origin"][2]
     U0, L0 = ht.section(0.0)                                   # root section, global z incl. incidence
     zg_up = ht.to_global(np.c_[U0[:, 0], np.zeros(len(U0)), U0[:, 1]])[:, 2]
@@ -926,30 +848,6 @@ def build(cfg):
     r_boom = (boom["diameter"] + clr) / 2
     z_boom = z_ht + ht_root_lo - Mt["wall"] - r_boom
     s_stub = (ht_root_up - 0.0) + 1.0                       # VT stub height above HT chord plane
-
-    hr = cfg["ht_rod"]
-    res, f = solve_continuous_rod(ht, hr["diameter"], clr, P["min_wall"], hr["chord_fraction"], None)
-    tail_bores = []
-    if res is None:
-        warn("HT rod does not fit, HT has no rod")
-    else:
-        x_r, z_r, semi = res
-        tail_bores.append(Bore("ht_rod", [x_r, -semi, z_r], [x_r, semi, z_r], hr["diameter"], clr))
-        info.append(f"HT rod: {hr['diameter']} mm, length {2 * semi:.0f} mm, through mount and both halves "
-                    f"(x={x_r:.1f}, z={z_r:.2f})")
-    vr = cfg["vt_rod"]
-    s_bottom = z_boom + r_boom + Mt["wall"] - z_ht           # VT rod bottom, stays above the boom bore
-    s_bottom = max(s_bottom, ht_root_lo)
-    res, f = solve_local_rod(vt, vr["diameter"], clr, P["min_wall"], vr["chord_fraction"], s_start=s_stub)
-    if res is None:
-        warn("VT rod does not fit, VT has no rod")
-    else:
-        p_top = res[1]
-        p_bot = res[0].copy()
-        p_bot[2] = z_ht + s_bottom
-        tail_bores.append(Bore("vt_rod", p_bot, p_top, vr["diameter"], clr))
-        info.append(f"VT rod: {vr['diameter']} mm, length {np.linalg.norm(p_top - p_bot):.0f} mm, "
-                    f"from the mount up into the VT")
 
     # elevator / rudder hinges (whole HT halves, whole VT above the stub; root end = top of print)
     for surf_ in (ht, vt):
@@ -962,40 +860,13 @@ def build(cfg):
     if abs(E["hinge_fraction"] * ht.cr - Rd["hinge_fraction"] * vt.cr) > 1.0 or abs(H["origin"][0] - Vt["origin"][0]) > 1.0:
         warn("elevator and rudder hinge lines are not at the same x; the mount is trimmed at the more "
              "forward one, so the other surface's fixed part overhangs the trimmed mount")
-    # elevator joiner: straight rod across the centreline, just aft of the V rear face, under the rudder
-    J = C["elevator_joiner"]
-    r_j = (J["diameter"] + clr) / 2
-    s_in, s_out = half_w + gap, half_w + J["insert"]
-    xj = None
-    x = h_el.x_h(s_in)
-    while x < ht.x_le(s_in) + ht.chord(s_in):
-        ok = True
-        for s in (s_in, s_out):
-            zc = ht.camber_at(s, x)
-            if (x - h_el.face_x(s, zc)) * math.cos(math.atan(h_el.tan)) < r_j + P["min_wall"] or \
-                    not fits(ht, s, x, zc, r_j, P["min_wall"]):
-                ok = False
-                break
-        if ok:
-            xj = x
-            break
-        x += 0.1
-    if xj is None:
-        warn("elevator joiner does not fit in the elevator; elevator halves are not joined")
-    else:
-        zj = ht.camber_at(s_in, xj)
-        xg, _, zg = ht.to_global([[xj, 0.0, zj]])[0]
-        tail_bores.append(Bore("elevator_joiner", [xg, -s_out, zg], [xg, s_out, zg], J["diameter"], clr))
-        info.append(f"Elevator joiner: {J['diameter']} mm rod, length {2 * s_out:.0f} mm, at x={xg:.1f}, z={zg:.2f}, "
-                    f"{J['insert'] - gap:.0f} mm into each elevator half; glue to the elevators only")
     for h in (h_el, h_rd):
-        check_hinge_bores(h, tail_bores, P["bore_keepout"])
         c = h.chord_aft(h.s0)
         info.append(f"{h.name.capitalize()}: whole {'HT halves' if h is h_el else 'VT above the mount'}, "
                     f"{h.s1 - h.s0 - gap:.0f} mm span{' each' if h is h_el else ''}, hinge at {h.f:.2f}c on the "
                     f"{'top' if h.sgn > 0 else 'bottom'} skin, chord {c:.1f} mm; V {h.vee:.0f} deg -> "
                     f"{h.throw:.0f} deg max towards the V side")
-    # rudder swing vs the elevator root faces, joiner swing vs mount and rudder bottom
+    # rudder swing vs the elevator root faces
     s_r = s_stub + gap
     U, L = vt.section(s_r)
     aft = np.r_[U[U[:, 0] > h_rd.x_h(s_r)], L[L[:, 0] > h_rd.x_h(s_r)]]
@@ -1003,46 +874,69 @@ def build(cfg):
     if lat > half_w + gap - 0.5:
         warn(f"rudder bottom swings {lat:.1f} mm sideways at {Rd['throw']:.0f} deg, the elevator roots are at "
              f"{half_w + gap:.1f} mm; reduce the rudder throw or widen the mount")
+    info.append(f"  rudder bottom swings +/-{lat:.1f} mm at full throw; elevator roots at +/-{half_w + gap:.1f} mm")
     x_cut = min(ht.to_global([[h_el.x_h(0.0), 0.0, h_el.apex(0.0)[1]]])[0][0], vt.to_global([[h_rd.x_h(0.0), 0.0, 0.0]])[0][0])
-    if xj is not None:
-        sw = np.vstack([h_el.sweep(s_in, [[xj, zj]], th) for th in np.linspace(-E["throw"], E["throw"], 21)])
-        swg = ht.to_global(np.c_[sw[:, 0], np.zeros(len(sw)), sw[:, 1]])
-        if swg[:, 0].min() - r_j < x_cut + 0.3:
-            warn("elevator joiner swings into the trimmed mount face; move the elevator hinge or the joiner aft")
-        z_rb = Vt["origin"][2] + s_r
-        if swg[:, 2].max() + r_j > z_rb - 0.5:
-            warn(f"elevator joiner rises to z={swg[:, 2].max() + r_j:.1f} at full throw, rudder bottom is at "
-                 f"z={z_rb:.1f}")
-        info.append(f"  joiner clears: mount face {swg[:, 0].min() - r_j - x_cut:.1f} mm, rudder bottom "
-                    f"{z_rb - swg[:, 2].max() - r_j:.1f} mm; rudder bottom swing +/-{lat:.1f} mm vs elevator roots "
-                    f"at +/-{half_w + gap:.1f} mm")
 
     print("building tail ...", flush=True)
-    ht_body = vase_panel(ht, half_w, ht.b, H["lattice_pitch"], H["lattice_angle"],
-                         [b for b in tail_bores if b.name in ("ht_rod", "elevator_joiner")], P,
+    ht_body = vase_panel(ht, half_w, ht.b, H["lattice_pitch"], H["lattice_angle"], [], P,
                          hinge=h_el, trims=[(half_w, +1)])
     parts["ht_R"] = dict(shape=ht_body, kind="vase", frame=ht, s0=half_w, s1=ht.b, tip_down=True)
     parts["ht_L"] = dict(shape=ht_body.mirror("XZ"), kind="vase", mirror_of="ht_R")
-    vt_body = vase_panel(vt, s_stub, vt.b, Vt["lattice_pitch"], Vt["lattice_angle"],
-                         [b for b in tail_bores if b.name == "vt_rod"], P, hinge=h_rd, trims=[(s_stub, +1)])
+    vt_body = vase_panel(vt, s_stub, vt.b, Vt["lattice_pitch"], Vt["lattice_angle"], [], P,
+                         hinge=h_rd, trims=[(s_stub, +1)])
     parts["vt"] = dict(shape=vt_body, kind="vase", frame=vt, s0=s_stub, s1=vt.b, tip_down=True)
 
     # mount
     x_le_ht = H["origin"][0]
     c_ht = ht.cr
-    x_front = x_le_ht - Mt["nose_ahead"]
     r_tube = r_boom + Mt["wall"]
+    # servo block: aft face on the HT LE, top on the HT chord plane, slots either side of the boom
+    TS = cfg["tail_servos"]
+    sw_ = TS["wall"]
+    sl_l, sl_w = TS["length"] + TS["clearance"], TS["width"] + TS["clearance"]
+    blk_x1 = x_le_ht
+    blk_x0 = blk_x1 - TS["tab_span"] - 2 * sw_
+    x_sc = 0.5 * (blk_x0 + blk_x1)
+    y_in = r_boom + sw_
+    blk_hw = y_in + sl_w + sw_
+    blk_z1 = z_ht
+    blk_z0 = min(blk_z1 - TS["tab_height"], z_boom - r_tube)
+    block = cq.Solid.makeBox(blk_x1 - blk_x0, 2 * blk_hw, blk_z1 - blk_z0, V((blk_x0, -blk_hw, blk_z0)))
+    slots = [cq.Solid.makeBox(sl_l, sl_w, blk_z1 - blk_z0 + 2, V((x_sc - sl_l / 2, y0, blk_z0 - 1)))
+             for y0 in (y_in, -y_in - sl_w)]
+    x_front = min(x_le_ht - Mt["nose_ahead"], blk_x0)
     centre = ht.solid(0, half_w).fuse(ht.solid(0, half_w).mirror("XZ"))
     stub = vt.solid(0, s_stub)
     tube = cylinder([x_front, 0, z_boom], [x_le_ht + 0.8 * c_ht, 0, z_boom], 2 * r_tube)
     web = cq.Solid.makeBox(0.65 * c_ht, 2 * r_tube, z_ht - 0.3 - z_boom,
                            V((x_le_ht + 0.12 * c_ht, -r_tube, z_boom)))
-    mount = centre.fuse(stub, tube, web).clean()
+    mount = centre.fuse(stub, tube, web, block).clean()
     boom_bore = cylinder([x_front - 1, 0, z_boom], [x_front + boom["socket_mount"], 0, z_boom], 2 * r_boom)
-    mount = biggest_solid(mount.cut(boom_bore, *[b.solid() for b in tail_bores]).clean())
-    # trim everything aft of the hinge line: clears the elevator joiner and the rudder bottom
+    mount = biggest_solid(mount.cut(boom_bore, *slots).clean())
+    info.append(f"Tail servo slots: 2 x {sl_l:.1f} x {sl_w:.1f} mm through-slots at x={x_sc - sl_l / 2:.1f}..{x_sc + sl_l / 2:.1f}, "
+                f"y=+/-{y_in:.1f}..{y_in + sl_w:.1f}; tabs sit on the block top at z={blk_z1:.1f}, case bottom "
+                f"at z={blk_z1 - TS['tab_height']:.1f}; block {blk_x1 - blk_x0:.1f} x {2 * blk_hw:.1f} x "
+                f"{blk_z1 - blk_z0:.1f} mm")
+    # trim everything aft of the hinge line: open gap between the elevator roots, under the rudder
     mount = biggest_solid(mount.intersect(cq.Solid.makeBox(1000, 1000, 1000, V((x_cut - 1000, -500, -500)))).clean())
     info.append(f"Tail mount trimmed aft of x={x_cut:.1f} (hinge line)")
+    mw = Mt["wall"]
+    r_in = r_tube - mw
+    cx0 = max(x_front + boom["socket_mount"], blk_x1) + mw
+    cx1 = x_cut - mw
+    U0, L0 = ht.section(0.0)
+    lo_g = ht.to_global(np.c_[L0[:, 0], np.zeros(len(L0)), L0[:, 1]])
+    in_rng = (lo_g[:, 0] >= cx0 - mw) & (lo_g[:, 0] <= cx1 + mw)
+    z_cav = min(lo_g[in_rng, 2].min() if in_rng.any() else z_ht, z_ht - 0.3) - mw
+    w_x0 = x_le_ht + 0.12 * c_ht + mw
+    cavity = cylinder([cx0, 0, z_boom], [cx1, 0, z_boom], 2 * r_in)
+    if z_cav > z_boom and cx1 > w_x0:
+        cavity = cavity.fuse(cq.Solid.makeBox(cx1 - w_x0, 2 * r_in, z_cav - z_boom, V((w_x0, -r_in, z_boom))))
+    cavity = cavity.intersect(cq.Solid.makeBox(cx1 - cx0, 2 * r_in, z_cav - (z_boom - r_in), V((cx0, -r_in, z_boom - r_in))))
+    m_before = mount.Volume()
+    mount = biggest_solid(mount.cut(cavity).clean())
+    info.append(f"Tail mount rear section hollow: x={cx0:.1f}..{cx1:.1f}, {mw} mm walls, "
+                f"{(m_before - mount.Volume()) * P['density_solid'] / 1000:.1f} g removed")
     parts["tail_mount"] = dict(shape=mount, kind="solid", print_axis="x")
 
     # ---------------- fuselage ----------------
@@ -1118,25 +1012,16 @@ def build(cfg):
     parts["nose"] = dict(shape=nose, kind="solid", print_axis="x")
     parts["wingbox"] = dict(shape=biggest_solid(wbox.clean()), kind="solid", print_axis="x")
 
-    rods = dict(boom=(boom["diameter"],
-                      (x_front + boom["socket_mount"]) - (x_end - boom["socket_fuselage"])))
-    info.append(f"Tail boom: {boom['diameter']} mm rod, length {rods['boom'][1]:.0f} mm "
+    boom_len = (x_front + boom["socket_mount"]) - (x_end - boom["socket_fuselage"])
+    info.append(f"Tail boom: {boom['diameter']} mm rod, length {boom_len:.0f} mm "
                 f"(horizontal at z={z_boom:.1f}), {boom['socket_fuselage']:.0f} mm into the wingbox, "
                 f"{boom['socket_mount']:.0f} mm into the tail mount")
-    rod_list = []
-    for b in bores:
-        if abs(b.p0[1]) < 1e-6 and np.allclose(b.p0[[0, 2]], b.p1[[0, 2]]):   # straight across centreline
-            rod_list.append((b.name, b.p1 * [1, -1, 1], b.p1, b.rod_d))
-        else:
-            rod_list.append((b.name + "_R", b.p0, b.p1, b.rod_d))
-            rod_list.append((b.name + "_L", b.p0 * [1, -1, 1], b.p1 * [1, -1, 1], b.rod_d))
-    for b in tail_bores:
-        rod_list.append((b.name, b.p0, b.p1, b.rod_d))
-    rod_list.append(("boom", [x_end - boom["socket_fuselage"], 0, z_boom],
-                     [x_front + boom["socket_mount"], 0, z_boom], boom["diameter"]))
+    rod_list = [("wing_spar", spar.p1 * [1, -1, 1], spar.p1, spar.rod_d),
+                ("boom", [x_end - boom["socket_fuselage"], 0, z_boom],
+                 [x_front + boom["socket_mount"], 0, z_boom], boom["diameter"])]
     for name, p0, p1, d in rod_list:
         parts["rod_" + name] = dict(shape=cylinder(p0, p1, d), kind="rod")
-    return parts, info, dict(wing=wing, ht=ht, vt=vt, bores=bores + tail_bores, z_boom=z_boom)
+    return parts, info
 
 # print orientation
 def print_matrix(part, parts):
@@ -1235,7 +1120,7 @@ def main():
         warn("controls.neck should sit between line_width and 2*line_width or the hinge skin drops out / splits the layer")
 
     t0 = time.time()
-    parts, info, geo = build(CONFIG)
+    parts, info = build(CONFIG)
     os.makedirs(os.path.join(args.out, "step"), exist_ok=True)
     os.makedirs(os.path.join(args.out, "stl"), exist_ok=True)
 
@@ -1310,7 +1195,6 @@ def main():
               "  1. Tape the hinge skin across the groove at neutral (surface still attached = aligned).",
               "  2. Run a blade along the flat at the bottom of the V to cut the neck.",
               "  3. Fold the surface fully towards the hinge-skin side (opens the V), tape across the opened joint.",
-              "  4. Elevator: slide the joiner through both halves (under the rudder), glue to the elevators only.",
               "  Servo pockets: open on the bottom skin; glue the trays in, the 45 deg ramp areas stay open."]
     if WARNINGS:
         lines += ["", "WARNINGS"] + ["  " + w for w in WARNINGS]
