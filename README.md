@@ -45,7 +45,7 @@ Written to `--out` (default `./rc_parts`):
 Install dependencies:
 
 ```bash
-pip install cadquery numpy trimesh networkx matplotlib
+pip install cadquery numpy trimesh networkx matplotlib shapely
 ```
 
 Run:

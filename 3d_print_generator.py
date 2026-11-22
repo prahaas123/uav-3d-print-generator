@@ -499,6 +499,7 @@ def clean_stl(path):
     """Drop zero-area triangles and close tessellation cracks that OCC sometimes leaves."""
     try:
         import trimesh
+        import shapely
         import networkx
     except ImportError:
         return None
@@ -519,8 +520,10 @@ def clean_stl(path):
 def vase_check(stl_path, layer=0.2):
     try:
         import trimesh
+        import shapely
+        import networkx
     except ImportError:
-        return "skipped (pip install trimesh)"
+        return "skipped (pip install trimesh shapely networkx)"
     m = trimesh.load(stl_path)
     zmax = m.bounds[1, 2]
     bad = []
@@ -546,6 +549,42 @@ def superellipse_wire(x, w, h, zc, n, k=40):
     z = zc + (h / 2) * np.sign(s) * np.abs(s) ** (2 / n)
     return cq.Wire.assembleEdges([cq.Edge.makeSpline([V((x, a, b)) for a, b in zip(y, z)], periodic=True)])
 
+def pchip(xk, yk, x):
+    """Monotone piecewise-cubic (Fritsch-Carlson) interpolation: never overshoots the data."""
+    xk, yk, x = np.asarray(xk, float), np.asarray(yk, float), np.asarray(x, float)
+    h = np.diff(xk)
+    d = np.diff(yk) / h
+    m = np.zeros_like(yk)
+    for i in range(1, len(xk) - 1):
+        if d[i - 1] * d[i] > 0:
+            w1, w2 = 2 * h[i] + h[i - 1], h[i] + 2 * h[i - 1]
+            m[i] = (w1 + w2) / (w1 / d[i - 1] + w2 / d[i])
+    for i, j, k in ((0, 0, 1), (-1, -1, -2)):        # one-sided, shape-preserving end slopes
+        if len(d) == 1:
+            m[i] = d[0]
+            continue
+        hj, hk = h[j], h[k]
+        e = ((2 * hj + hk) * d[j] - hj * d[k]) / (hj + hk)
+        if e * d[j] <= 0:
+            e = 0.0
+        elif d[j] * d[k] <= 0 and abs(e) > abs(3 * d[j]):
+            e = 3 * d[j]
+        m[i] = e
+    i = np.clip(np.searchsorted(xk, x) - 1, 0, len(h) - 1)
+    t = (x - xk[i]) / h[i]
+    h00, h10, h01, h11 = 2 * t**3 - 3 * t**2 + 1, t**3 - 2 * t**2 + t, -2 * t**3 + 3 * t**2, t**3 - t**2
+    return h00 * yk[i] + h10 * h[i] * m[i] + h01 * yk[i + 1] + h11 * h[i] * m[i + 1]
+
+def densify_stations(st, extra_x=(), step=6.0):
+    """Resample (x, w, h, z_top) stations every ~step mm with PCHIP so the loft has no room to
+    overshoot between sparse stations (a spline loft through few sections bulges and dips)."""
+    xk = np.array([s[0] for s in st])
+    keep = sorted(set(xk.tolist()) | {float(x) for x in extra_x})
+    grid = [x for x in np.arange(xk[0], xk[-1], step)
+            if min(abs(x - k) for k in keep) > 0.4 * step]
+    xs = np.array(sorted(keep + grid))
+    cols = [pchip(xk, [s[k] for s in st], xs) for k in (1, 2, 3)]
+    return [[float(x), float(a), float(b), float(c)] for x, a, b, c in zip(xs, *cols)]
 
 def build(cfg):
     P = cfg["print"]
@@ -698,16 +737,13 @@ def build(cfg):
     st = [list(s) for s in F["stations"]]
     tube_d = 2 * (r_boom + F["socket_wall"])
     st[-1] = [st[-1][0], tube_d, tube_d, z_boom + tube_d / 2]
-    xs = np.array([s[0] for s in st])
-    if not any(abs(xs - F["split_x"]) < 1e-6):
-        row = [F["split_x"]] + [float(np.interp(F["split_x"], xs, [s[k] for s in st])) for k in (1, 2, 3)]
-        st.append(row)
-        st.sort(key=lambda r: r[0])
+    st = densify_stations(st, extra_x=[F["split_x"]])
     t = F["wall"]
     n = F["squareness"]
     outer = cq.Solid.makeLoft([superellipse_wire(x, w, h, zt - h / 2, n) for x, w, h, zt in st], False)
     inner_st = [list(s) for s in st]
     inner_st[0][0] += F["firewall"]
+    inner_st = [inner_st[0]] + [s for s in inner_st[1:] if s[0] > inner_st[0][0] + 1.0]
     inner_st[-1][0] -= t
     inner = cq.Solid.makeLoft([superellipse_wire(x, max(w - 2 * t, 0.5), max(h - 2 * t, 0.5), zt - h / 2, n)
                                for x, w, h, zt in inner_st], False)
