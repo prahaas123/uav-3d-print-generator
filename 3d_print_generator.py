@@ -7,30 +7,35 @@ import cadquery as cq
 from OCP.gp import gp_Trsf
 from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
 
-# CONFIGURATION
+# =====================================================================================
+# CONFIG. The default numbers were read off conventional_design.png. Replace them with
+# the exact values from vsp_single_design_conventional.py.
+# =====================================================================================
 CONFIG = dict(
     wing=dict(
-        root_chord=100.0, tip_chord=50.0,
-        semispan=349.5,              # root (centreline) to tip, measured along the span
-        le_sweep=3.27,               # deg
-        dihedral=2.0,                # deg
+        root_chord=102.1, tip_chord=102.1 * 0.5,
+        semispan=700.0 / 2,          # VSP TotalSpan / 2, measured along the span
+        le_sweep=2.89,               # deg
+        dihedral=2.5,                # deg
         twist=0.0,                   # deg at tip, linear, about c/4 (+ = nose up)
-        airfoil="naca2412",          # "nacaXXXX" or a Selig .dat path
+        incidence=2.0,               # deg, VSP Y_Rel_Rotation about the root LE
+        airfoil=r"C:\Users\kprah\Desktop\Prahaas\WatArrow\VSP Automation\Airfoils\goe322.dat",  # "nacaXXXX" or a Selig/Lednicer .dat (relative = next to this script)
         origin=(0.0, 0.0, 0.0),      # root LE
         splits=[0.0, 0.5, 1.0],      # panel breaks as fraction of semispan (2 or 3 panels)
         lattice_pitch=22.0,          # perpendicular spacing between parallel slots
         lattice_angle=45.0,          # slot angle to the span axis
     ),
     htail=dict(
-        root_chord=45.0, tip_chord=45.0, semispan=80.0, le_sweep=0.0, dihedral=0.0,
-        twist=0.0, airfoil="naca0008", origin=(367.0, 0.0, 0.0),
+        root_chord=45.66, tip_chord=45.66, semispan=159.81 / 2, le_sweep=0.0, dihedral=0.0,
+        twist=0.0, incidence=1.1531, airfoil="naca0012", origin=(366.29, 0.0, 0.0),   # x = l_H
         lattice_pitch=15.0, lattice_angle=45.0,
     ),
     vtail=dict(
-        root_chord=45.0, tip_chord=45.0, span=80.0, le_sweep=0.0, twist=0.0,
-        airfoil="naca0008", origin=(367.0, 0.0, 0.0),
+        root_chord=45.66, tip_chord=45.66 * 1.0, span=80.0, le_sweep=0.0, twist=0.0,
+        airfoil="naca0012", origin=(366.29, 0.0, 0.0),
         lattice_pitch=15.0, lattice_angle=45.0,
     ),
+    x_cg=32.71,                      # target CG aft of wing root LE (for the balance report)
 
     # ---- carbon rods (diameters are the rods, bores get ROD_CLEARANCE added) ----------
     wing_spar=dict(
@@ -41,15 +46,16 @@ CONFIG = dict(
         max_semi_length=None,        # cap on the rod's half length (None = as far as it fits)
     ),
     wing_pins=dict(diameter=2.0, length=30.0, rear_fraction=0.60),  # panel-joint alignment pins
-    ht_rod=dict(diameter=1.5, chord_fraction=0.22),
-    vt_rod=dict(diameter=1.5, chord_fraction=0.45),
+    ht_rod=dict(diameter=2.0, chord_fraction=0.22),
+    vt_rod=dict(diameter=2.0, chord_fraction=0.45),
     boom=dict(diameter=8.0, socket_fuselage=40.0, socket_mount=30.0),
 
     # ---- tail mount ---------------------------------------------------------------------
     mount=dict(width=14.0, nose_ahead=15.0, wall=1.6),
 
     # ---- fuselage (pod under the wing; nose + wingbox) -------------------------------------
-    # stations: (x, width, height, z_top). Under the wing z_top sits 1 mm above the chord plane and the wing is subtracted, which leaves a saddle that matches the wing.
+    # stations: (x, width, height, z_top). Under the wing z_top sits 1 mm above the chord
+    # plane and the wing is subtracted, which leaves a saddle that matches the wing.
     # The last station is replaced by the boom-socket end automatically.
     fuselage=dict(
         stations=[(-110.0, 30.0, 30.0, -4.0),
@@ -57,6 +63,7 @@ CONFIG = dict(
                   (-20.0, 46.0, 46.0, 1.0),
                   (30.0, 46.0, 46.0, 1.0),
                   (90.0, 42.0, 40.0, 1.0),
+                  (106.0, 36.0, 34.0, -3.0),   # just aft of the wing TE (incidence drops the TE)
                   (150.0, 0.0, 0.0, 0.0)],
         squareness=2.6,              # superellipse exponent (2 = ellipse, higher = boxier)
         wall=1.0,
@@ -64,7 +71,7 @@ CONFIG = dict(
         spigot_length=12.0, spigot_wall=1.0, spigot_clearance=0.15,
         firewall=3.0,
         motor_center_hole=8.0, motor_bolt=3.2, motor_bolt_spacing=(16.0, 19.0),
-        dowel_diameter=3.2, dowel_x=(-8.0, 108.0), dowel_below_top=8.0,
+        dowel_diameter=3.2, dowel_x=(-8.0, 106.0), dowel_below_top=8.0,
         socket_wall=1.4,
     ),
 
@@ -79,6 +86,7 @@ CONFIG = dict(
         rod_clearance=0.15,          # added to rod diameter for bores
         density_vase=0.55,           # g/cm^3, effective foamed LW-PLA in vase mode
         density_solid=0.75,          # g/cm^3, LW-PLA for normal-print parts
+        density_rod=1.55,            # g/cm^3, solid CF rod (boom: use a tube and the report over-estimates)
         stl_tolerance=0.02, stl_angular=0.15,
     ),
 )
@@ -104,6 +112,13 @@ def rot_x(deg):
     a = math.radians(deg)
     T = np.eye(4)
     T[1:3, 1:3] = [[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]]
+    return T
+
+def rot_y(deg):
+    """+deg = nose up (TE down), as VSP Y_Rel_Rotation."""
+    a = math.radians(deg)
+    T = np.eye(4)
+    T[0, 0], T[0, 2], T[2, 0], T[2, 2] = math.cos(a), math.sin(a), -math.sin(a), math.cos(a)
     return T
 
 def translate(p):
@@ -156,31 +171,42 @@ def naca4(code, n=N_AF):
     # resample both surfaces on the common cosine x grid
     return x, np.interp(x, xu, zu), np.interp(x, xl, zl)
 
-def selig(path, n=N_AF):
-    pts = []
+
+def read_dat(path, n=N_AF):
+    """Selig (TE->upper->LE->lower->TE) or Lednicer (counts line, upper LE->TE, lower LE->TE)."""
+    rows = []
     with open(path) as f:
         for line in f:
             try:
                 a, b = map(float, line.split()[:2])
-                pts.append((a, b))
+                rows.append((a, b))
             except ValueError:
                 continue
-    pts = np.array(pts)
-    i = int(np.argmin(pts[:, 0]))
-    up, lo = pts[:i + 1][::-1], pts[i:]
-    x0, x1 = pts[i, 0], max(up[-1, 0], lo[-1, 0])
+    if rows and rows[0][0] > 1.5:                                  # Lednicer
+        nu, nl = int(rows[0][0]), int(rows[0][1])
+        up, lo = np.array(rows[1:1 + nu]), np.array(rows[1 + nu:1 + nu + nl])
+    else:                                                          # Selig
+        pts = np.array(rows)
+        i = int(np.argmin(pts[:, 0]))
+        up, lo = pts[:i + 1][::-1], pts[i:]
+    x0 = min(up[0, 0], lo[0, 0])
+    z0 = 0.5 * (up[0, 1] + lo[0, 1])
+    c = max(up[-1, 0], lo[-1, 0]) - x0
     x = _cosine(n)
-    xs = x0 + x * (x1 - x0)
-    zu = np.interp(xs, up[:, 0], up[:, 1])
-    zl = np.interp(xs, lo[:, 0], lo[:, 1])
-    c = x1 - x0
-    return x, (zu - pts[i, 1]) / c, (zl - pts[i, 1]) / c
+    zu = (np.interp(x0 + x * c, up[:, 0], up[:, 1]) - z0) / c
+    zl = (np.interp(x0 + x * c, lo[:, 0], lo[:, 1]) - z0) / c
+    return x, zu, zl
+
 
 def load_airfoil(spec):
     s = spec.strip().lower()
     if s.startswith("naca") and len(s) == 8 and s[4:].isdigit():
         return naca4(s[4:])
-    return selig(spec)
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (spec, os.path.join(here, spec), os.path.join(os.getcwd(), spec)):
+        if os.path.isfile(p):
+            return read_dat(p)
+    raise SystemExit(f"Airfoil file not found: {spec} (looked next to the script and in the working folder)")
 
 # lifting surface
 class Surface:
@@ -188,14 +214,15 @@ class Surface:
     and placed by G = translate(origin) @ rot_x(dihedral). Vertical tail: dihedral = 90."""
 
     def __init__(self, name, root_chord, tip_chord, span, le_sweep, twist, airfoil, origin,
-                 dihedral, te_thickness):
+                 dihedral, te_thickness, incidence=0.0):
         self.name = name
         self.cr, self.ct, self.b = root_chord, tip_chord, span
         self.tan_le = math.tan(math.radians(le_sweep))
         self.twist_tip = twist
         self.xn, self.zu_n, self.zl_n = load_airfoil(airfoil)
         self.te = te_thickness
-        self.G = translate(origin) @ rot_x(dihedral)
+        # VSP order: incidence (Y_Rel_Rotation) about the root LE, dihedral within the wing
+        self.G = translate(origin) @ rot_y(incidence) @ rot_x(dihedral)
         self.Ginv = np.linalg.inv(self.G)
         self.R = self.G[:3, :3]
 
@@ -212,7 +239,8 @@ class Surface:
     def section(self, s):
         """local (x, z) of upper and lower surface at station s (same x-ordering, LE first)."""
         c, xle = self.chord(s), self.x_le(s)
-        te_n = self.te / c
+        # thicken the TE only up to te_thickness (the airfoil may already have a blunt TE)
+        te_n = max(0.0, self.te / c - (self.zu_n[-1] - self.zl_n[-1]))
         zu = self.zu_n + self.xn * te_n / 2
         zl = self.zl_n - self.xn * te_n / 2
         x = xle + self.xn * c
@@ -376,10 +404,11 @@ class Bore:
         ax = (self.p1 - self.p0) / self.length
         return cylinder(self.p0 - ax * margin, self.p1 + ax * margin, self.d + 2 * margin)
 
-    def slit(self, surf, width, depth=40.0, overrun=1.0):
-        """Thin cut from the bore axis straight 'down' (panel -z) through the bottom skin.
-        Built in the panel frame with its ends on constant-span planes (= print layers) and
-        running `overrun` past the bore ends, so no layer can see a sealed sliver."""
+    def slit(self, surf, width, overrun, depth=40.0):
+        """Thin cut from the TOP of the bore straight 'down' (panel -z) through the bottom skin.
+        Built in the panel frame with its ends on constant-span planes (= print layers), running
+        `overrun` (= the bore keep-out) past the bore ends. Starting at the bore top means a layer
+        that only clips the tilted end of a bore still sees that sliver joined to the outside."""
         a0, a1 = apply(surf.Ginv, [self.p0, self.p1])
         if a1[1] < a0[1]:
             a0, a1 = a1, a0
@@ -388,7 +417,8 @@ class Bore:
             return None
         dirn = (a1 - a0) / ds                      # per unit span
         b0, b1 = a0 - dirn * overrun, a1 + dirn * overrun
-        quad = [b0, b1, b1 - [0, 0, depth], b0 - [0, 0, depth]]
+        top = np.array([0, 0, self.d / 2])
+        quad = [b0 + top, b1 + top, b1 - [0, 0, depth], b0 - [0, 0, depth]]
         nrm = np.cross(a1 - a0, [0, 0, 1.0])
         nrm /= np.linalg.norm(nrm)
         quad = [q - nrm * width / 2 for q in quad]
@@ -412,14 +442,13 @@ def solve_continuous_rod(surf, rod_d, clearance, min_wall, fraction, cap, step=1
     Picks z to maximise how far it reaches inside the (dihedralled) surface."""
     r = (rod_d + clearance) / 2
     f = surf.max_thickness_fraction() if fraction is None else fraction
-    x_g = surf.to_global([[surf.x_le(0) + f * surf.cr, 0, 0]])[0, 0]
-    lo0, up0 = surf.surfaces_at(0.0, surf.x_le(0) + f * surf.cr)
-    z0 = surf.to_global([[0, 0, 0]])[0, 2]
+    x_f = surf.x_le(0) + f * surf.cr
+    lo0, up0 = surf.surfaces_at(0.0, x_f)
     best = (-1, None)
     cands = np.arange(lo0 + r + min_wall, up0 - r - min_wall + 1e-9, 0.05)
     cands = sorted(cands, key=lambda z: abs(z - 0.5 * (lo0 + up0)))   # prefer centred on ties
     for zl in cands:
-        z_g = z0 + zl
+        x_g, _, z_g = surf.to_global([[x_f, 0, zl]])[0]
         y = 0.0
         while True:
             pl = apply(surf.Ginv, [[x_g, y + step, z_g]])[0]
@@ -427,10 +456,11 @@ def solve_continuous_rod(surf, rod_d, clearance, min_wall, fraction, cap, step=1
                 break
             y += step
         if y > best[0] + 1e-9:
-            best = (y, z_g)
-    reach, z_g = best
-    if z_g is None:
+            best = (y, (x_g, z_g))
+    reach, xz = best
+    if xz is None:
         return None, f
+    x_g, z_g = xz
     semi = reach if cap is None else min(reach, cap)
     return (x_g, z_g, semi), f
 
@@ -462,7 +492,7 @@ def vase_panel(surf, s0, s1, pitch, angle, bores, P):
     tools = surf.slot_cutters(s0, s1, pitch, angle, P["slot_width"], P["slot_gap"], bores, P["bore_keepout"])
     for b in bores:
         tools.append(b.solid())
-        sl = b.slit(surf, P["slot_width"])
+        sl = b.slit(surf, P["slot_width"], P["bore_keepout"])
         if sl is not None:
             tools.append(sl)
     body = body.cut(*tools)
@@ -473,7 +503,7 @@ def clean_stl(path):
     """Drop zero-area triangles and close tessellation cracks that OCC sometimes leaves."""
     try:
         import trimesh
-        import networkx  # noqa: F401  trimesh's hole filling needs it
+        import networkx
     except ImportError:
         return None
     m = trimesh.load(path)
@@ -530,7 +560,8 @@ def build(cfg):
     # ---------------- wing ----------------
     W = cfg["wing"]
     wing = Surface("wing", W["root_chord"], W["tip_chord"], W["semispan"], W["le_sweep"],
-                   W["twist"], W["airfoil"], W["origin"], W["dihedral"], P["te_thickness"])
+                   W["twist"], W["airfoil"], W["origin"], W["dihedral"], P["te_thickness"],
+                   W.get("incidence", 0.0))
     sp = cfg["wing_spar"]
     bores = []
     if sp["mode"] == "continuous":
@@ -569,9 +600,9 @@ def build(cfg):
                 if tag == "front":
                     continue
                 x = wing.x_le(0) + fr * wing.cr
-                z = wing.to_global([[0, 0, wing.camber_at(0, x)]])[0, 2]
+                xg, _, zg = wing.to_global([[x, 0, wing.camber_at(0, x)]])[0]
                 ok = fits(wing, 0.0, x, wing.camber_at(0, x), r, P["min_wall"])
-                p0, p1 = [x + W["origin"][0], 0, z], [x + W["origin"][0], pins["length"] / 2, z]
+                p0, p1 = [xg, 0, zg], [xg, pins["length"] / 2, zg]
             else:
                 pts = []
                 ok = True
@@ -601,12 +632,18 @@ def build(cfg):
     # ---------------- tail ----------------
     H, Vt, Mt = cfg["htail"], cfg["vtail"], cfg["mount"]
     ht = Surface("ht", H["root_chord"], H["tip_chord"], H["semispan"], H["le_sweep"], H["twist"],
-                 H["airfoil"], H["origin"], H["dihedral"], P["te_thickness"])
+                 H["airfoil"], H["origin"], H["dihedral"], P["te_thickness"], H.get("incidence", 0.0))
     vt = Surface("vt", Vt["root_chord"], Vt["tip_chord"], Vt["span"], Vt["le_sweep"], Vt["twist"],
                  Vt["airfoil"], Vt["origin"], 90.0, P["te_thickness"])
     half_w = Mt["width"] / 2
-    ht_root_lo, ht_root_up = ht.surfaces_at(0, ht.x_le(0) + ht.max_thickness_fraction() * ht.cr)
+    xm = ht.x_le(0) + ht.max_thickness_fraction() * ht.cr
+    ht_root_lo, ht_root_up = ht.surfaces_at(0, xm)
     z_ht = H["origin"][2]
+    U0, L0 = ht.section(0.0)                                   # root section, global z incl. incidence
+    zg_up = ht.to_global(np.c_[U0[:, 0], np.zeros(len(U0)), U0[:, 1]])[:, 2]
+    zg_lo = ht.to_global(np.c_[L0[:, 0], np.zeros(len(L0)), L0[:, 1]])[:, 2]
+    ht_root_lo = float(np.interp(xm, U0[:, 0], zg_lo)) - z_ht    # under the max-thickness point
+    ht_root_up = float(zg_up.max()) - z_ht
     boom = cfg["boom"]
     r_boom = (boom["diameter"] + clr) / 2
     z_boom = z_ht + ht_root_lo - Mt["wall"] - r_boom
@@ -653,7 +690,7 @@ def build(cfg):
     centre = ht.solid(0, half_w).fuse(ht.solid(0, half_w).mirror("XZ"))
     stub = vt.solid(0, s_stub)
     tube = cylinder([x_front, 0, z_boom], [x_le_ht + 0.8 * c_ht, 0, z_boom], 2 * r_tube)
-    web = cq.Solid.makeBox(0.65 * c_ht, 2 * r_tube, z_ht - z_boom,
+    web = cq.Solid.makeBox(0.65 * c_ht, 2 * r_tube, z_ht - 0.3 - z_boom,
                            V((x_le_ht + 0.12 * c_ht, -r_tube, z_boom)))
     mount = centre.fuse(stub, tube, web).clean()
     boom_bore = cylinder([x_front - 1, 0, z_boom], [x_front + boom["socket_mount"], 0, z_boom], 2 * r_boom)
@@ -836,11 +873,16 @@ def main():
     lines += info + [""]
     lines.append(f"{'part':<12}{'print':<34}{'mass g':>8}{'  vase check'}")
     total = 0.0
+    moment = 0.0
+    rod_mass = 0.0
     assy = cq.Assembly(name="aircraft")
     for name, part in parts.items():
         shp = part["shape"]
         if part["kind"] == "rod":
             assy.add(shp, name=name, color=cq.Color(0.1, 0.1, 0.1))
+            m_r = shp.Volume() * P["density_rod"] / 1000
+            rod_mass += m_r
+            moment += m_r * shp.Center().x
             continue
         if not shp.isValid():
             warn(f"{name}: OCC reports the solid as invalid; check it in SolidWorks")
@@ -852,24 +894,43 @@ def main():
             area = sum(f.Area() for f in faces)
             caps = sum(f.Area() for f in faces if f.geomType() == "PLANE" and f.Area() > 50)
             mass = (area - caps) * P["line_width"] * P["density_vase"] / 1000 + caps * 0.6 * P["density_vase"] / 1000
+            cx = sum(f.Area() * f.Center().x for f in faces) / area
             how = "vase mode, " + ("tip on bed" if parts.get(part.get("mirror_of", name), part).get("tip_down") else "root on bed")
         else:
             mass = shp.Volume() * P["density_solid"] / 1000
+            cx = shp.Center().x
             how = "normal, front face on bed"
         total += mass
+        moment += mass * cx
         chk = ""
         if not args.no_stl:
             pth = os.path.join(args.out, "stl", f"{name}.stl")
-            cq.exporters.export(to_print(name, parts), pth, tolerance=P["stl_tolerance"],
-                                angularTolerance=P["stl_angular"])
-            if clean_stl(pth) is False:
+            shp_p = to_print(name, parts)
+            for k in (1.0, 0.7, 1.4, 0.5):        # retry tessellation if OCC leaves a crack
+                cq.exporters.export(shp_p, pth, tolerance=P["stl_tolerance"] * k,
+                                    angularTolerance=P["stl_angular"] * k)
+                ok = clean_stl(pth)
+                if ok is not False:
+                    break
+            else:
                 warn(f"{name}.stl is not watertight after cleanup; let the slicer repair it")
             if args.check and part["kind"] == "vase":
                 chk = vase_check(pth)
         lines.append(f"{name:<12}{how:<34}{mass:8.1f}  {chk}")
         print(f"  {name:<12}{how:<34}{mass:7.1f} g  {chk}", flush=True)
     assy.export(os.path.join(args.out, "step", "assembly.step"))
-    lines.append(f"{'TOTAL printed':<46}{total:8.1f}  (rods, electronics not included)")
+    lines.append(f"{'TOTAL printed':<46}{total:8.1f}")
+    m_s = total + rod_mass
+    x_s = moment / m_s
+    x_cg = CONFIG["x_cg"]
+    x_fw = CONFIG["fuselage"]["stations"][0][0]
+    lines += ["", "Balance (airframe = printed parts + CF rods, no electronics)",
+              f"  CF rods {rod_mass:.1f} g (solid; a tube boom is lighter), airframe {m_s:.1f} g, "
+              f"airframe CG x = {x_s:.1f} mm aft of root LE",
+              f"  target x_cg = {x_cg:.2f} mm -> electronics must supply {m_s * (x_s - x_cg):.0f} g.mm nose-down moment "
+              f"about x_cg,",
+              f"  e.g. {m_s * (x_s - x_cg) / (x_cg - (x_fw + 25)):.0f} g of motor/battery/ESC lumped at x = {x_fw + 25:.0f} mm "
+              f"(25 mm behind the firewall)"]
     lines += ["", "Slicer: spiral vase / spiralize for vase parts, line width "
               f"{P['line_width']} mm, 3-4 bottom layers, no top layers.",
               "Wing panels: inboard panels print root-down (closed face at the joint, open tip),",
