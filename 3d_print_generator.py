@@ -473,6 +473,7 @@ def clean_stl(path):
     """Drop zero-area triangles and close tessellation cracks that OCC sometimes leaves."""
     try:
         import trimesh
+        import networkx  # noqa: F401  trimesh's hole filling needs it
     except ImportError:
         return None
     m = trimesh.load(path)

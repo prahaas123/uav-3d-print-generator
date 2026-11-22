@@ -42,10 +42,10 @@ Written to `--out` (default `./rc_parts`):
 
 ## Usage
 
-Install dependencies (`trimesh` and `matplotlib` are optional):
+Install dependencies:
 
 ```bash
-pip install cadquery numpy trimesh matplotlib
+pip install cadquery numpy trimesh networkx matplotlib
 ```
 
 Run:
