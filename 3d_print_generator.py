@@ -7,10 +7,6 @@ import cadquery as cq
 from OCP.gp import gp_Trsf
 from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
 
-# =====================================================================================
-# CONFIG. The default numbers were read off conventional_design.png. Replace them with
-# the exact values from vsp_single_design_conventional.py.
-# =====================================================================================
 CONFIG = dict(
     wing=dict(
         root_chord=102.1, tip_chord=102.1 * 0.5,
